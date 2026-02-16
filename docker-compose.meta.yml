@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # Meta Agent Backend (FastAPI + WebSocket)
+  # ============================================================================
+  meta-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.meta
+      target: production
+    container_name: meta-agent
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - NODE_ENV=production
+      # Secrets from .env file (mounted as secrets in production)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - SUPABASE_URL=${SUPABASE_URL:-}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY:-}
+    volumes:
+      - meta-memory:/app/memory
+      - canonical-orders:/app/canonical_orders
+    networks:
+      - archon-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "coolify.managed=true"
+      - "coolify.serviceId=meta-agent"
+      - "coolify.type=application"
+
+  # ============================================================================
+  # Connection Window Frontend (React)
+  # ============================================================================
+  connection-window:
+    build:
+      context: ./connection-window
+      dockerfile: Dockerfile.frontend
+    container_name: connection-window
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://meta-agent:8000
+      - REACT_APP_WS_URL=ws://meta-agent:8000/ws
+    depends_on:
+      meta-agent:
+        condition: service_healthy
+    networks:
+      - archon-network
+    labels:
+      - "coolify.managed=true"
+      - "coolify.serviceId=connection-window"
+
+  # ============================================================================
+  # Redis for caching and pub/sub (optional, for scaling)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: meta-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - archon-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================================
+  # Nginx Reverse Proxy (for production)
+  # ============================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: meta-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ssl-certs:/etc/nginx/ssl:ro
+    depends_on:
+      - meta-agent
+      - connection-window
+    networks:
+      - archon-network
+    labels:
+      - "coolify.managed=true"
+      - "coolify.type=proxy"
+
+networks:
+  archon-network:
+    driver: bridge
+    labels:
+      - "coolify.managed=true"
+
+volumes:
+  meta-memory:
+    driver: local
+  canonical-orders:
+    driver: local
+  redis-data:
+    driver: local
+  ssl-certs:
+    driver: local

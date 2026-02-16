@@ -1,0 +1,134 @@
+# Meta Agent - Archon X
+# Multi-stage Dockerfile for production deployment
+
+# ============================================================================
+# Stage 1: Python Backend Builder
+# ============================================================================
+FROM python:3.11-slim as python-builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
+
+# ============================================================================
+# Stage 2: Node.js Frontend Builder
+# ============================================================================
+FROM node:20-slim as node-builder
+
+WORKDIR /app
+
+# Copy frontend package files
+COPY connection-window/package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+# Copy frontend source
+COPY connection-window/ ./
+
+# Build the frontend
+RUN npm run build
+
+# ============================================================================
+# Stage 3: Production Image
+# ============================================================================
+FROM python:3.11-slim as production
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash appuser
+
+# Copy Python wheels from builder
+COPY --from=python-builder /app/wheels /wheels
+RUN pip install --no-cache /wheels/*
+
+# Copy application code
+COPY --chown=appuser:appuser . /app
+
+# Copy built frontend from node-builder
+COPY --from=node-builder --chown=appuser:appuser /app/build /app/connection-window/build
+
+# Create necessary directories
+RUN mkdir -p /app/memory /app/canonical_orders && \
+    chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    NODE_ENV=production
+
+# Expose ports
+# 8000: FastAPI backend
+# 3000: Frontend (if served separately)
+EXPOSE 8000 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/ || exit 1
+
+# Default command - run the Connection Window server
+CMD ["python", "-m", "connection_window.server.main"]
+
+# ============================================================================
+# Development Image (optional)
+# ============================================================================
+FROM python:3.11-slim as development
+
+WORKDIR /app
+
+# Install development dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    curl \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install development tools
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-asyncio \
+    pytest-cov \
+    black \
+    ruff \
+    mypy
+
+# Copy application code
+COPY . .
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    NODE_ENV=development
+
+# Expose ports
+EXPOSE 8000 3000
+
+# Default command for development
+CMD ["python", "-m", "connection_window.server.main"]
